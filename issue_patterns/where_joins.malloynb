@@ -1,3 +1,6 @@
+>>>markdown
+# Where in Source
+There is a problem with `where:` in sources when the where clause contains a reference to a joined source.  Currently we build a join based on a subquery but this is problematic because of join ordering and we don't have a solution that works on all databases (it uses nested structures).
 >>>malloy
 ##! experimental.scalar_lenses
 source: airports is duckdb.table('data/airports.parquet') extend {
@@ -26,12 +29,14 @@ run: foo -> {
     santa_cruz_airports is santa_cruz_airports.airport_count 
     ca_airports is santa_cruz_airports.ca_airports.airport_count 
 }
+>>>markdown
+This is the code that is currently generated and it generates the right results.
 >>>sql
 -- connection: duckdb
 SELECT 
    COUNT( 1) as "airport_count",
    (COUNT(DISTINCT santa_cruz_airports_0."code")) as "santa_cruz_airports"
-FROM '../data/airports.parquet' as foo
+FROM 'data/airports.parquet' as foo
 LEFT JOIN (
   SELECT santa_cruz_airports_0.*, STRUCT_PACK(
     ca_airports_0."id", 
@@ -61,21 +66,56 @@ LEFT JOIN (
     ca_airports_0."mil_rts", 
     ca_airports_0."cntl_twr", 
     ca_airports_0."major") AS ca_airports_0
-  FROM '../data/airports.parquet' AS santa_cruz_airports_0
-  LEFT JOIN '../data/airports.parquet' AS ca_airports_0
+  FROM 'data/airports.parquet' AS santa_cruz_airports_0
+  LEFT JOIN 'data/airports.parquet' AS ca_airports_0
     ON santa_cruz_airports_0."code"=ca_airports_0."code" AND (ca_airports_0."state"='CA')
   
   WHERE ca_airports_0."county"='SANTA CRUZ'
 ) AS santa_cruz_airports_0
   ON foo."code"=santa_cruz_airports_0."code"
+>>>markdown
+You might think you could write the query this way, but it turns the join into an inner join and filters out the joins in the main query.
 >>>sql
 SELECT 
    COUNT( 1) as "airport_count",
    (COUNT(DISTINCT santa_cruz_airports_0."code")) as "santa_cruz_airports",
    (COUNT(DISTINCT ca_airports_0."code")) as "ca_airports"
-FROM '../data/airports.parquet' as foo
-LEFT JOIN '../data/airports.parquet' AS santa_cruz_airports_0
+FROM 'data/airports.parquet' as foo
+LEFT JOIN 'data/airports.parquet' AS santa_cruz_airports_0
   ON foo."code"=santa_cruz_airports_0."code"
-LEFT JOIN '../data/airports.parquet' AS ca_airports_0
+LEFT JOIN 'data/airports.parquet' AS ca_airports_0
   ON santa_cruz_airports_0."code"=ca_airports_0."code" AND (ca_airports_0."state"='CA')
 WHERE  ca_airports_0."county"='SANTA CRUZ'
+>>>markdown
+One solution is run a query against the source that produces a list with the join predicates.
+>>>malloy
+run: santa_cruz_airports -> {select: code}
+>>>markdown
+Which can produces the sql.
+>>>sql
+SELECT 
+   santa_cruz_airports."code" as "code"
+FROM 'data/airports.parquet' as santa_cruz_airports
+LEFT JOIN 'data/airports.parquet' AS ca_airports_0
+  ON santa_cruz_airports."code"=ca_airports_0."code" AND (ca_airports_0."state"='CA')
+WHERE ca_airports_0."county"='SANTA CRUZ'
+>>>markdown
+And then write the query as...
+>>>sql
+SELECT 
+   COUNT( 1) as "airport_count",
+   (COUNT(DISTINCT santa_cruz_airports_0."code")) as "santa_cruz_airports",
+   (COUNT(DISTINCT ca_airports_0."code")) as "ca_airports"
+FROM 'data/airports.parquet' as foo
+LEFT JOIN (
+  SELECT 
+   santa_cruz_airports."code" as "code"
+    FROM 'data/airports.parquet' as santa_cruz_airports
+    LEFT JOIN 'data/airports.parquet' AS ca_airports_0
+    ON santa_cruz_airports."code"=ca_airports_0."code" AND (ca_airports_0."state"='CA')
+    WHERE ca_airports_0."county"='SANTA CRUZ'  
+) as santa_cruz_airports_filter on foo.code = santa_cruz_airports_filter.code
+LEFT JOIN 'data/airports.parquet' AS santa_cruz_airports_0
+  ON santa_cruz_airports_filter."code"=santa_cruz_airports_0."code"
+LEFT JOIN 'data/airports.parquet' AS ca_airports_0
+  ON santa_cruz_airports_0."code"=ca_airports_0."code" AND (ca_airports_0."state"='CA')
