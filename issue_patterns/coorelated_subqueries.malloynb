@@ -1,0 +1,95 @@
+>>>markdown
+# Dialects that don't support (or have limmited support) for Coorelated Subqueries
+Malloy relies on coorelated subqueries to compute nested pipelines in queries. A useful example is auto binning bar charts.  The first stage of the query collects data and computes bin size, the second stage uses the bin size for grouping.  The `by_elevation` query pipeline can be used as nest in a query.
+>>>malloy
+source: airports is duckdb.table('data/airports.parquet') extend {
+  measure: airport_count is count()
+  # bar_chart
+  view: by_elevation is {
+    aggregate: bin_size is (max(elevation) - min(elevation)) / 30
+    nest: data is  {
+      group_by: elevation
+      aggregate: row_count is count()
+    }
+  } -> {
+    group_by: elevation is 
+      floor(data.elevation / bin_size) * nullif(bin_size, 0) + bin_size / 2
+    aggregate: airport_count is data.row_count.sum()
+    order_by: elevation
+  }
+}
+>>>markdown
+Used as a nested query.
+>>>malloy
+run: airports -> {
+  group_by: state is state
+  aggregate: airport_count
+  nest: by_elevation
+}
+>>>markdown
+The final stage is a coorelated subquery that contans the second stage of the pipeliine.
+
+```
+SELECT
+  "state__0" as "state",
+  MAX(CASE WHEN group_set=0 THEN "airport_count__0" END) as "airport_count",
+  (WITH __stage0 AS (
+    SELECT 
+       (FLOOR(data_0."elevation"*1.0/base."bin_size")*NULLIF(base."bin_size", 0))+base."bin_size"*1.0/2 as "elevation",
+       COALESCE(SUM(data_0."row_count"),0) as "airport_count"
+    FROM (SELECT UNNEST([COALESCE(FIRST({"bin_size": "bin_size__1" , "data": "data__1" }) FILTER(WHERE group_set=1), {"bin_size": NULL, "data": NULL})]) as base) as base
+    LEFT JOIN LATERAL (SELECT UNNEST(base."data"), 1 as ignoreme) as data_0_outer(data_0,ignoreme) ON data_0_outer.ignoreme=1
+    GROUP BY 1
+    ORDER BY 1 ASC NULLS LAST
+  )
+  SELECT LIST(STRUCT_PACK("elevation","airport_count")) FROM __stage0
+  ) as "by_elevation"
+FROM __stage1
+GROUP BY 1
+ORDER BY 2 desc NULLS LAST
+```
+>>>malloy
+source: airports2 is duckdb.table('data/airports.parquet') extend {
+  measure: airport_count is count()
+  view: by_elevation1 is {
+    aggregate: bin_size is (max(elevation) - min(elevation)) / 30
+    nest: data is  {
+      group_by: elevation
+      aggregate: row_count is count()
+    }
+  }
+  # bar_chart
+  view: by_elevation is by_elevation1 -> {
+    group_by: elevation is 
+      floor(data.elevation / bin_size) * nullif(bin_size, 0) + bin_size / 2
+    aggregate: airport_count is data.row_count.sum()
+    order_by: elevation
+  }
+}
+>>>markdown
+This query will generate an error in trino and snowflake
+>>>malloy
+run: airports2 -> {
+  group_by: state is state
+  aggregate: airport_count
+  nest: by_elevation
+}
+>>>markdown
+We can mechanically rewrite this query so the second stage (or stages) occur after the query.  Group by all the fields in the query, and rewrite the nested query in terms of the full result.
+>>>malloy
+run: airports2 -> {
+  group_by: state is state
+  aggregate: airport_count
+  nest: by_elevation1
+}
+-> {
+  group_by: state, airport_count
+  # bar_chart
+  nest: by_elevation is  {
+    group_by: elevation is 
+      floor(by_elevation1.data.elevation / by_elevation1.bin_size) * nullif(by_elevation1.bin_size, 0) + by_elevation1.bin_size / 2
+    aggregate: airport_count is by_elevation1.data.row_count.sum()
+    order_by: elevation
+  }
+  order_by: airport_count desc
+}
