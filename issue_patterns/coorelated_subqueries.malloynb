@@ -93,3 +93,64 @@ run: airports2 -> {
   }
   order_by: airport_count desc
 }
+>>>markdown
+For more more complex queries, we can use multi stage queries to compute the substages and then re-stitch the queries back together.
+>>>malloy
+query: stage1 is  airports2 -> {
+  group_by: 
+    state is state
+  aggregate: airport_count
+  -- add and id that we can use to find and replace the second stage
+  calculate: id is row_number()
+  nest: by_elevation1
+}
+
+// compute the new staging.
+query: stage2 is  stage1 -> {
+  group_by: id
+  nest: by_elevation is  {
+    group_by: elevation is 
+      floor(by_elevation1.data.elevation / by_elevation1.bin_size) * nullif(by_elevation1.bin_size, 0) + by_elevation1.bin_size / 2
+    aggregate: airport_count is by_elevation1.data.row_count.sum()
+    order_by: elevation
+  }
+}
+
+// replace the nested query with the second stage
+run: duckdb.sql("""
+  select 
+    state,
+    airport_count,
+    by_elevation
+  from %{stage1} as stage1
+  left join %{stage2} as stage2 on stage1.id = stage2.id
+""")
+>>>markdown
+## Deeply nested second stage
+The query below has a multi stage query at a second level of nesting.
+>>>malloy
+run: airports -> {
+  group_by: state is state
+  aggregate: airport_count
+  limit: 5
+  nest: by_county is {
+    group_by: county
+    aggregate: airport_count
+    nest: by_elevation
+    limit: 2
+  }
+}
+>>>malloy
+query: n_stage1 is airports2 -> {
+  group_by: state is state
+  aggregate: airport_count
+  //calculate: id is row_number()
+  limit: 5
+  nest: by_county is {
+    //calculate: id is row_number()
+    group_by: county
+    aggregate: airport_count
+    nest: by_elevation1
+    limit: 2
+  }
+}
