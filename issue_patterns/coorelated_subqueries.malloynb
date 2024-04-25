@@ -144,13 +144,53 @@ run: airports -> {
 query: n_stage1 is airports2 -> {
   group_by: state is state
   aggregate: airport_count
-  //calculate: id is row_number()
+  calculate: id is row_number()
   limit: 5
   nest: by_county is {
     //calculate: id is row_number()
+    group_by: id is county
     group_by: county
     aggregate: airport_count
-    nest: by_elevation1
+    nest: by_elevation1 
     limit: 2
   }
 }
+
+// Run the pipeline at the appropriate nest level.
+query: n_stage2 is  n_stage1 -> {
+  group_by: 
+    id
+    by_county_id is by_county.id
+  nest: by_elevation is  {
+    group_by: elevation is 
+      floor(by_county.by_elevation1.data.elevation / by_county.by_elevation1.bin_size) * nullif(by_county.by_elevation1.bin_size, 0) + by_county.by_elevation1.bin_size / 2
+    aggregate: airport_count is by_county.by_elevation1.data.row_count.sum()
+    order_by: elevation
+  }
+}
+
+// re-assemble from the bottom up.
+query: n_stage3 is duckdb.sql("""
+  SELECT 
+    base."id" as id,
+    {
+      county: by_county_0.county,
+      airport_count: by_county_0.airport_count,
+      by_elevation: stage2.by_elevation,
+      --by_county_id: by_county_0.id
+    } as by_county
+
+  FROM (SELECT *, UNNEST(by_county) as by_county_0 FROM %{n_stage1}) as base
+  LEFT JOIN %{n_stage2} as stage2 on base.id = stage2.id
+    AND by_county_0.id = stage2.by_county_id
+""")
+
+run: duckdb.sql("""
+  select 
+    state,
+    airport_count,
+    by_county
+  from %{stage1} as stage1
+  left join %{n_stage3} as stage3 on stage1.id = stage3.id
+  order by airport_count desc
+""")
